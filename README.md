@@ -54,6 +54,27 @@ claude.ai → **Settings → Connectors → Add custom connector**:
 
 Add it at the **organization** level so it can be shared, not just your own account.
 
+### Auth: header, not URL
+
+The connector token is sent in the **`Authorization: Bearer <token>`** header — nothing
+secret ever appears in the URL. In a Cowork plugin's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "Aspire_MCP": {
+      "type": "http",
+      "url": "https://<your-host>/mcp",
+      "headers": { "Authorization": "Bearer ${ASPIRE_CONNECTOR_TOKEN}" }
+    }
+  }
+}
+```
+
+The server still accepts the old `POST /mcp/<token>` path form for backward
+compatibility during migration, but it is **deprecated**. Once every consumer sends the
+token as a header, delete the legacy route in `index.ts` and rotate `CONNECTOR_TOKEN`.
+
 ## Step 6 — Roll out to management (read-only)
 
 - Enable the connector for the management group/space.

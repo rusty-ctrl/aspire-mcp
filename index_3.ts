@@ -120,15 +120,43 @@ function buildServer(): McpServer {
   return server;
 }
 
-const app = express();
-app.use(express.json({ limit: "4mb" }));
-app.get("/health", (_req, res) => res.json({ ok: true }));
-app.post("/mcp/:token", async (req, res) => {
-  if (req.params.token !== CONNECTOR_TOKEN) return res.status(404).end();
+// Shared MCP request handler (stateless streamable-HTTP).
+async function runMcp(req: express.Request, res: express.Response) {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => transport.close());
   const server = buildServer();
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
+}
+
+// Pull the connector token out of an Authorization header.
+// Accepts "Authorization: Bearer <token>" and a bare "Authorization: <token>".
+function bearerToken(req: express.Request): string | undefined {
+  const auth = req.header("authorization");
+  if (!auth) return undefined;
+  const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
+  return (m ? m[1] : auth).trim();
+}
+
+const app = express();
+app.use(express.json({ limit: "4mb" }));
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Preferred: token travels in the Authorization header, never in the URL.
+// 403 (not 401) on a bad/missing token so clients don't try to negotiate OAuth.
+app.post("/mcp", async (req, res) => {
+  if (bearerToken(req) !== CONNECTOR_TOKEN) return res.status(403).end();
+  await runMcp(req, res);
 });
-app.listen(PORT, () => console.log(`Aspire read-only MCP listening on :${PORT}/mcp/<token>`));
+
+// DEPRECATED legacy route: token in the URL path. Kept only so existing installs
+// keep working during migration to header auth. Remove (and rotate CONNECTOR_TOKEN)
+// once every consumer sends the token as an Authorization header.
+app.post("/mcp/:token", async (req, res) => {
+  if (req.params.token !== CONNECTOR_TOKEN) return res.status(404).end();
+  await runMcp(req, res);
+});
+
+app.listen(PORT, () =>
+  console.log(`Aspire read-only MCP on :${PORT} (POST /mcp with Bearer token; legacy /mcp/<token> still accepted)`)
+);
