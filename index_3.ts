@@ -21,11 +21,16 @@ const ASPIRE_SECRET = requireEnv("ASPIRE_SECRET");
 const CONNECTOR_TOKEN = requireEnv("CONNECTOR_TOKEN");
 const PORT = Number(process.env.PORT ?? 8080);
 
+// ALLOWED_RESOURCES="*" (or empty) => allow ANY Aspire resource. The server only ever
+// issues GETs, so it stays read-only by construction no matter how wide the allow-list is.
+// Otherwise, restrict to the explicit comma-separated list.
+const ALLOWED_RAW = (process.env.ALLOWED_RESOURCES ?? "*").trim();
+const ALLOW_ALL = ALLOWED_RAW === "*" || ALLOWED_RAW === "";
 const ALLOWED_RESOURCES = new Set(
-  (process.env.ALLOWED_RESOURCES ??
-    "Invoices,InvoiceOpportunities,Opportunities,WorkTickets,Receipts,Contacts,Properties,Payments,Companies"
-  ).split(",").map((s) => s.trim())
+  ALLOW_ALL ? [] : ALLOWED_RAW.split(",").map((s) => s.trim()).filter(Boolean)
 );
+const ASPIRE_SWAGGER_URL =
+  process.env.ASPIRE_SWAGGER_URL ?? `${ASPIRE_BASE_URL}/swagger/v1/swagger.json`;
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -50,8 +55,27 @@ async function getAspireToken(): Promise<string> {
   return token;
 }
 
+// Pull the full list of queryable resources straight from Aspire's published Swagger,
+// so we never have to maintain an allow-list by hand. Cached for an hour. Public endpoint.
+let cachedResourceNames: { value: string[]; expiresAt: number } | null = null;
+async function fetchAspireResourceNames(): Promise<string[]> {
+  if (cachedResourceNames && Date.now() < cachedResourceNames.expiresAt) return cachedResourceNames.value;
+  const res = await fetch(ASPIRE_SWAGGER_URL, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`Swagger fetch failed: ${res.status}`);
+  const spec: any = await res.json();
+  const names = Array.from(
+    new Set(
+      Object.keys(spec.paths ?? {})
+        .map((p) => p.replace(/^\//, "").split("/")[0]) // "/WorkTicketTimes/{id}" -> "WorkTicketTimes"
+        .filter((n) => n && !n.startsWith("{") && n.toLowerCase() !== "version")
+    )
+  ).sort();
+  cachedResourceNames = { value: names, expiresAt: Date.now() + 3_600_000 };
+  return names;
+}
+
 async function aspireGet(resource: string, odata: Record<string, string | number | undefined>) {
-  if (!ALLOWED_RESOURCES.has(resource)) {
+  if (!ALLOW_ALL && !ALLOWED_RESOURCES.has(resource)) {
     throw new Error(`Resource "${resource}" not allowed. Allowed: ${[...ALLOWED_RESOURCES].join(", ")}`);
   }
   const token = await getAspireToken();
@@ -69,9 +93,22 @@ function buildServer(): McpServer {
 
   server.tool(
     "list_aspire_resources",
-    "List the Aspire resources this read-only connector can query.",
+    "List the Aspire resources this read-only connector can query (live from Aspire's published API when unrestricted).",
     {},
-    async () => ({ content: [{ type: "text", text: [...ALLOWED_RESOURCES].join("\n") }] })
+    async () => {
+      let names: string[];
+      if (ALLOW_ALL) {
+        try {
+          names = await fetchAspireResourceNames();
+        } catch {
+          // Fall back to a known-good core list if the Swagger fetch is unavailable.
+          names = "Invoices,InvoiceOpportunities,Opportunities,WorkTickets,WorkTicketTimes,WorkTicketVisits,Receipts,Contacts,Properties,Payments,Companies,Vendors,Services".split(",");
+        }
+      } else {
+        names = [...ALLOWED_RESOURCES];
+      }
+      return { content: [{ type: "text", text: names.join("\n") }] };
+    }
   );
 
   // Generic read-only query. Param names have NO leading "$" (Claude rejects those);
